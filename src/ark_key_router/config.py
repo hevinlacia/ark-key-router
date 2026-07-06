@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 
 DEFAULT_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/coding/v3"
+DEFAULT_WEIGHT_CONFIG_PATH = "config/key-weights.json"
 
 
 @dataclass(frozen=True)
@@ -12,6 +13,9 @@ class KeyRef:
     name: str
     env_var: str
     weight: int
+
+    def with_weight(self, weight: int) -> "KeyRef":
+        return KeyRef(self.name, self.env_var, weight)
 
 
 @dataclass(frozen=True)
@@ -35,6 +39,15 @@ class ModelAlias:
             return self.litellm_model.removeprefix("openai/")
         return self.litellm_model
 
+    def with_key_weights(self, weights: dict[str, int]) -> "ModelAlias":
+        return ModelAlias(
+            alias=self.alias,
+            litellm_model=self.litellm_model,
+            base_url=self.base_url,
+            keys=tuple(key.with_weight(weights.get(key.name, key.weight)) for key in self.keys),
+            retry_policy=self.retry_policy,
+        )
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -46,6 +59,7 @@ class Settings:
     request_timeout_seconds: float
     local_bearer_token: str | None
     usage_db_path: str
+    weight_config_path: str
 
 
 ARK_KEYS: tuple[KeyRef, ...] = (
@@ -141,5 +155,9 @@ def load_settings() -> Settings:
         usage_db_path=os.getenv(
             "ARK_KEY_ROUTER_USAGE_DB_PATH",
             "~/.local/state/ark-key-router/usage.sqlite3",
+        ),
+        weight_config_path=os.getenv(
+            "ARK_KEY_ROUTER_WEIGHT_CONFIG_PATH",
+            DEFAULT_WEIGHT_CONFIG_PATH,
         ),
     )

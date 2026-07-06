@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import threading
@@ -291,3 +292,52 @@ def time_filter_sql(start: float | None, end: float | None) -> tuple[str, tuple]
     if not clauses:
         return "", ()
     return "WHERE " + " AND ".join(clauses), tuple(args)
+
+
+class KeyWeightConfig:
+    def __init__(self, path: str, defaults: dict[str, int]):
+        if path == ":memory:":
+            self.path = Path(path)
+        else:
+            expanded_path = Path(os.path.expanduser(path))
+            self.path = expanded_path if expanded_path.is_absolute() else Path.cwd() / expanded_path
+        self.defaults = dict(defaults)
+        self._lock = threading.Lock()
+
+    def get(self) -> dict[str, int]:
+        with self._lock:
+            weights = dict(self.defaults)
+            if str(self.path) == ":memory:":
+                return weights
+            if not self.path.exists():
+                self._write(weights)
+                return weights
+            try:
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                return weights
+            if not isinstance(data, dict):
+                return weights
+            for key_name, weight in data.items():
+                if key_name not in weights:
+                    continue
+                try:
+                    weights[str(key_name)] = int(weight)
+                except (TypeError, ValueError):
+                    continue
+            return weights
+
+    def set(self, weights: dict[str, int]) -> dict[str, int]:
+        with self._lock:
+            next_weights = dict(self.defaults)
+            next_weights.update(weights)
+            if str(self.path) == ":memory:":
+                self.defaults = next_weights
+                return next_weights
+            self._write(next_weights)
+            return next_weights
+
+    def _write(self, weights: dict[str, int]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        content = json.dumps(dict(sorted(weights.items())), indent=2) + "\n"
+        self.path.write_text(content, encoding="utf-8")

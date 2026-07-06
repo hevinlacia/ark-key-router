@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
-from .config import KeyRef, ModelAlias, Settings
-from .usage_store import UsageStore
+from .config import ALIASES, KeyRef, ModelAlias, Settings
+from .usage_store import KeyWeightConfig, UsageStore
 
 
 @dataclass
@@ -29,6 +29,7 @@ class RouterState:
         self.frozen: dict[str, FrozenKey] = {}
         self.bindings: dict[tuple[str, str], SessionBinding] = {}
         self.usage_store = UsageStore(settings.usage_db_path)
+        self.weight_config = KeyWeightConfig(settings.weight_config_path, default_key_weights())
 
     def cleanup(self) -> None:
         now = time.time()
@@ -131,6 +132,63 @@ class RouterState:
     ) -> dict:
         return self.usage_store.snapshot(period=period, start=start, end=end)
 
+    def key_weight_overrides(self) -> dict[str, int]:
+        return self.weight_config.get()
+
+    def key_config_snapshot(self) -> dict:
+        weights = self.key_weight_overrides()
+        aliases = {}
+        for alias_name, alias in self.settings_aliases().items():
+            effective_alias = alias.with_key_weights(weights)
+            total_weight = sum(max(0, key.weight) for key in effective_alias.keys)
+            aliases[alias_name] = {
+                "model": alias.litellm_model,
+                "base_url": alias.base_url,
+                "keys": [
+                    {
+                        "name": key.name,
+                        "default_weight": default_key.weight,
+                        "weight": key.weight,
+                        "probability": round(key.weight / total_weight, 4)
+                        if total_weight > 0 and key.weight > 0
+                        else 0.0,
+                    }
+                    for key, default_key in zip(effective_alias.keys, alias.keys, strict=True)
+                ],
+            }
+        return {
+            "aliases": aliases,
+            "weights": weights,
+            "config_path": str(self.weight_config.path),
+        }
+
+    def set_key_weights(self, weights: dict[str, int]) -> None:
+        known_names = {key.name for alias in self.settings_aliases().values() for key in alias.keys}
+        unknown_names = sorted(set(weights) - known_names)
+        if unknown_names:
+            raise ValueError(f"unknown key name(s): {', '.join(unknown_names)}")
+        invalid_names = sorted(name for name, weight in weights.items() if weight < 0)
+        if invalid_names:
+            raise ValueError(f"negative weight for key(s): {', '.join(invalid_names)}")
+        effective_weights = self.weight_config.set(weights)
+        self.rebind_zero_weight_sessions(effective_weights)
+
+    def alias_with_runtime_weights(self, alias: ModelAlias) -> ModelAlias:
+        return alias.with_key_weights(self.key_weight_overrides())
+
+    def rebind_zero_weight_sessions(self, weights: dict[str, int]) -> None:
+        zero_weight_names = {name for name, weight in weights.items() if weight <= 0}
+        if not zero_weight_names:
+            return
+        self.bindings = {
+            binding_key: binding
+            for binding_key, binding in self.bindings.items()
+            if binding.key_name not in zero_weight_names
+        }
+
+    def settings_aliases(self) -> dict[str, ModelAlias]:
+        return ALIASES
+
 
 class NoAvailableKeyError(Exception):
     def __init__(self, retry_after: int):
@@ -153,6 +211,14 @@ def weighted_pick(keys: list[KeyRef], session_id: str | None, alias: str) -> Key
         if target < running:
             return key
     return keys[-1]
+
+
+def default_key_weights() -> dict[str, int]:
+    weights: dict[str, int] = {}
+    for alias in ALIASES.values():
+        for key in alias.keys:
+            weights[key.name] = key.weight
+    return weights
 
 
 def parse_retry_after(value: str | None) -> float | None:

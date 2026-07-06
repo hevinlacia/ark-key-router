@@ -57,6 +57,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         state.reset_usage()
         return {"ok": True, "usage": state.usage_snapshot()}
 
+    @app.get("/api/config/weights")
+    async def api_config_weights() -> dict[str, Any]:
+        return {"ok": True, **state.key_config_snapshot()}
+
+    @app.put("/api/config/weights")
+    async def api_config_weights_update(request: Request) -> dict[str, Any]:
+        payload = await request.json()
+        weights = payload.get("weights") if isinstance(payload, dict) else None
+        if not isinstance(weights, dict):
+            raise HTTPException(status_code=400, detail="weights must be an object")
+        try:
+            parsed_weights = {str(name): int(weight) for name, weight in weights.items()}
+            state.set_key_weights(parsed_weights)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, **state.key_config_snapshot()}
+
     @app.post("/v1/chat/completions")
     async def chat_completions(
         request: Request,
@@ -67,7 +84,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         validate_auth(settings, authorization)
         payload = await request.json()
         model_name = payload.get("model")
-        alias = ALIASES.get(model_name)
+        base_alias = ALIASES.get(model_name)
+        alias = state.alias_with_runtime_weights(base_alias) if base_alias is not None else None
         if alias is None:
             raise HTTPException(status_code=404, detail=f"unsupported model alias: {model_name}")
 

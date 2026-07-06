@@ -21,8 +21,10 @@ DASHBOARD_HTML = """
     .field { display: grid; gap: 6px; }
     .field label { color: #94a3b8; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
     select, input { background: #111827; border: 1px solid #334155; border-radius: 10px; color: #e5e7eb; padding: 9px 10px; }
+    input.weight-input { width: 86px; text-align: right; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; margin: 22px 0; }
     .card { background: linear-gradient(180deg, #111827, #0f172a); border: 1px solid #1f2937; border-radius: 16px; padding: 16px; box-shadow: 0 18px 60px rgb(0 0 0 / 22%); }
+    .section-title { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
     .label { color: #94a3b8; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
     .value { font-size: 30px; font-weight: 800; margin-top: 8px; }
     table { width: 100%; border-collapse: collapse; margin-top: 10px; }
@@ -31,6 +33,7 @@ DASHBOARD_HTML = """
     th { color: #93c5fd; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
     .muted { color: #94a3b8; }
     .ok { color: #86efac; }
+    .error { color: #fca5a5; }
     @media (max-width: 640px) { main { padding: 18px; } header { align-items: flex-start; flex-direction: column; } }
   </style>
 </head>
@@ -69,6 +72,8 @@ DASHBOARD_HTML = """
   </section>
 
   <section class="grid" id="summary"></section>
+  <section class="card"><div class="section-title"><h2>Key Weights</h2><span class="muted" id="weights-note">Loading weights...</span></div><div id="key-weights"></div></section>
+  <section class="card"><div class="section-title"><h2>Today by Key</h2><span class="muted" id="today-by-key-note"></span></div><div id="today-by-key"></div></section>
   <section class="card"><h2>Daily Requests</h2><div id="by-day"></div></section>
   <section class="card"><h2>Monthly Requests</h2><div id="by-month"></div></section>
   <section class="card"><h2>Usage by Model</h2><div id="by-model"></div></section>
@@ -89,6 +94,26 @@ function table(data) {
   if (!entries.length) return '<p class="muted">No data yet.</p>';
   const rows = entries.map(([name, item]) => `<tr><td>${name}</td><td>${number.format(item.requests)}</td><td>${number.format(item.errors)}</td><td>${number.format(item.prompt_tokens)}</td><td>${number.format(item.cached_tokens || 0)}</td><td>${formatPercent(item.cache_hit_rate)}</td><td>${number.format(item.completion_tokens)}</td><td>${number.format(item.total_tokens)}</td></tr>`).join('');
   return `<table><thead><tr><th>Name</th><th>Requests</th><th>Errors</th><th>Prompt</th><th>Cached</th><th>Cache Hit</th><th>Completion</th><th>Total</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function tokenTable(data) {
+  const entries = Object.entries(data || {}).sort((left, right) => (right[1].total_tokens || 0) - (left[1].total_tokens || 0));
+  if (!entries.length) return '<p class="muted">No token usage today.</p>';
+  const rows = entries.map(([name, item]) => `<tr><td>${name}</td><td>${number.format(item.prompt_tokens)}</td><td>${number.format(item.cached_tokens || 0)}</td><td>${formatPercent(item.cache_hit_rate)}</td><td>${number.format(item.completion_tokens)}</td><td>${number.format(item.total_tokens)}</td><td>${number.format(item.requests)}</td></tr>`).join('');
+  return `<table><thead><tr><th>Key</th><th>Prompt</th><th>Cached</th><th>Cache Hit</th><th>Completion</th><th>Total Tokens</th><th>Requests</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function weightsTable(config) {
+  const weights = config.weights || {};
+  const entries = Object.entries(weights).sort((left, right) => left[0].localeCompare(right[0]));
+  if (!entries.length) return '<p class="muted">No configurable keys.</p>';
+  const total = entries.reduce((sum, [, weight]) => sum + Math.max(0, Number(weight) || 0), 0);
+  const rows = entries.map(([name, weight]) => {
+    const numericWeight = Math.max(0, Number(weight) || 0);
+    const probability = total > 0 ? `${((numericWeight / total) * 100).toFixed(1)}%` : '0.0%';
+    return `<tr><td>${name}</td><td><input class="weight-input" data-key="${name}" type="number" min="0" step="1" value="${numericWeight}"></td><td>${probability}</td></tr>`;
+  }).join('');
+  return `<table><thead><tr><th>Key</th><th>Weight</th><th>Probability</th></tr></thead><tbody>${rows}</tbody></table><div class="toolbar"><button onclick="saveWeights()">Save Weights</button><button class="secondary" onclick="loadWeights()">Reload Weights</button><span id="weights-status" class="muted"></span></div>`;
 }
 
 function formatPercent(value) {
@@ -117,8 +142,12 @@ function frozenTable(data) {
 }
 
 async function loadData() {
-  const response = await fetch(usageUrl());
+  const [response, todayResponse] = await Promise.all([
+    fetch(usageUrl()),
+    fetch('/api/usage?period=today'),
+  ]);
   const data = await response.json();
+  const todayUsage = await todayResponse.json();
   const usage = data.usage.total;
   document.getElementById('subtitle').textContent = `Uptime ${number.format(data.usage.uptime_seconds)}s · ${data.bindings} active bindings · ${data.usage.range.period} range`;
   document.getElementById('summary').innerHTML = [
@@ -130,12 +159,45 @@ async function loadData() {
     card('Completion Tokens', usage.completion_tokens),
     card('Total Tokens', usage.total_tokens),
   ].join('');
+  document.getElementById('today-by-key').innerHTML = tokenTable(todayUsage.by_key);
+  document.getElementById('today-by-key-note').textContent = `${number.format(todayUsage.total.total_tokens)} tokens today`;
   document.getElementById('by-day').innerHTML = table(data.usage.by_day);
   document.getElementById('by-month').innerHTML = table(data.usage.by_month);
   document.getElementById('by-model').innerHTML = table(data.usage.by_model);
   document.getElementById('by-key').innerHTML = table(data.usage.by_key);
   document.getElementById('by-status').innerHTML = table(data.usage.by_status);
   document.getElementById('frozen').innerHTML = frozenTable(data.frozen);
+}
+
+async function loadWeights() {
+  const response = await fetch('/api/config/weights');
+  const config = await response.json();
+  document.getElementById('key-weights').innerHTML = weightsTable(config);
+  document.getElementById('weights-note').textContent = config.config_path || '';
+}
+
+async function saveWeights() {
+  const inputs = document.querySelectorAll('.weight-input');
+  const weights = {};
+  for (const input of inputs) {
+    weights[input.dataset.key] = Number(input.value || 0);
+  }
+  const response = await fetch('/api/config/weights', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ weights }),
+  });
+  const result = await response.json();
+  const status = document.getElementById('weights-status');
+  if (!response.ok) {
+    status.className = 'error';
+    status.textContent = result.detail || 'Failed to save weights';
+    return;
+  }
+  status.className = 'ok';
+  status.textContent = 'Saved. New requests use these weights immediately.';
+  document.getElementById('key-weights').innerHTML = weightsTable(result);
+  await loadData();
 }
 
 async function resetUsage() {
@@ -150,6 +212,7 @@ function clearRange() {
 }
 
 loadData();
+loadWeights();
 setInterval(loadData, 5000);
 </script>
 </body>

@@ -10,7 +10,7 @@ from ark_key_router.proxy import call_upstream
 from ark_key_router.state import NoAvailableKeyError, RouterState, parse_quota_reset
 
 
-def settings(usage_db_path: str = ":memory:") -> Settings:
+def settings(usage_db_path: str = ":memory:", weight_config_path: str = ":memory:") -> Settings:
     return Settings(
         host="127.0.0.1",
         port=8789,
@@ -20,6 +20,7 @@ def settings(usage_db_path: str = ":memory:") -> Settings:
         request_timeout_seconds=60,
         local_bearer_token=None,
         usage_db_path=usage_db_path,
+        weight_config_path=weight_config_path,
     )
 
 
@@ -231,6 +232,32 @@ def test_usage_stats_custom_range_can_exclude_events(tmp_path) -> None:
 
     assert usage["total"]["requests"] == 0
     assert usage["by_day"] == {}
+
+
+def test_runtime_key_weights_are_persisted_and_applied(tmp_path) -> None:
+    config_path = str(tmp_path / "key-weights.json")
+    state = RouterState(settings(weight_config_path=config_path))
+
+    state.set_key_weights({"garvin": 0, "wilford": 10})
+
+    restored = RouterState(settings(weight_config_path=config_path))
+    weighted_alias = restored.alias_with_runtime_weights(alias())
+    weights = {key.name: key.weight for key in weighted_alias.keys}
+    assert weights["garvin"] == 0
+    assert weights["wilford"] == 10
+    assert restored.key_config_snapshot()["config_path"] == config_path
+
+
+def test_zero_weight_drops_existing_session_binding(tmp_path) -> None:
+    config_path = str(tmp_path / "key-weights.json")
+    state = RouterState(settings(weight_config_path=config_path))
+    state.bind("glm-latest-auto", "session-a", "garvin")
+
+    state.set_key_weights({"garvin": 0})
+
+    selected = state.select_key(alias().with_key_weights(state.key_weight_overrides()), "session-a")
+
+    assert selected.name != "garvin"
 
 
 def _oai_alias() -> ModelAlias:

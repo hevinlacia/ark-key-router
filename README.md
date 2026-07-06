@@ -42,6 +42,10 @@ Dashboard:
 xdg-open http://127.0.0.1:8789/dashboard
 ```
 
+The dashboard includes a **Key Weights** panel. Saving weights writes
+`config/key-weights.json`, and new requests use the updated ratios immediately
+without restarting the service.
+
 Usage metrics API:
 
 ```bash
@@ -88,9 +92,18 @@ ARK_KEY_ROUTER_5H_QUOTA_FALLBACK_SECONDS=5400
 ARK_KEY_ROUTER_REQUEST_TIMEOUT_SECONDS=600
 ARK_KEY_ROUTER_BEARER_TOKEN=<optional; falls back to OPENCODE_AI_LITELLM_API_KEY>
 ARK_KEY_ROUTER_USAGE_DB_PATH=~/.local/state/ark-key-router/usage.sqlite3
+ARK_KEY_ROUTER_WEIGHT_CONFIG_PATH=config/key-weights.json
 ```
 
 No real key values should be committed or printed.
+
+Key routing weights are stored in `config/key-weights.json` by default, so the
+preferred local ratios can be committed and synced to GitHub without committing
+any secrets. The dashboard can update this file through `/api/config/weights`;
+new requests pick up the updated weights immediately without restarting the
+router. Existing session bindings continue until they expire unless a key is set
+to weight `0`, which drops active bindings for that key so it stops receiving
+new routed requests.
 
 Usage metrics are persisted to SQLite by default and can be filtered by `period`, `start`,
 and `end`. The API returns total request counts, token counts, daily/monthly rollups, and
