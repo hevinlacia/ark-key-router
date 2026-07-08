@@ -160,7 +160,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         validate_auth(settings, authorization)
         payload = await request.json()
         model_name = payload.get("model")
-        base_alias = ALIASES.get(model_name)
+        base_alias = state.settings_aliases().get(model_name)
         alias = state.alias_with_runtime_weights(base_alias) if base_alias is not None else None
         if alias is None:
             raise HTTPException(status_code=404, detail=f"unsupported model alias: {model_name}")
