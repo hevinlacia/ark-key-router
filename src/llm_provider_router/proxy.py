@@ -9,7 +9,7 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
-from .config import ALIASES, KeyRef, ModelAlias, Settings, load_settings
+from .config import KeyRef, ModelAlias, Settings, load_settings
 from .dashboard import DASHBOARD_HTML
 from .state import NoAvailableKeyError, RouterState, parse_quota_reset, parse_retry_after
 
@@ -63,7 +63,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "created": 0,
                     "owned_by": "llm-provider-router",
                 }
-                for alias in ALIASES.values()
+                for alias in state.settings_aliases().values()
             ],
         }
 
@@ -160,26 +160,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         validate_auth(settings, authorization)
         payload = await request.json()
         model_name = payload.get("model")
-        base_alias = state.settings_aliases().get(model_name)
-        alias = state.alias_with_runtime_weights(base_alias) if base_alias is not None else None
-        if alias is None:
+        if not isinstance(model_name, str):
+            raise HTTPException(status_code=400, detail="model must be a string")
+        route_aliases = state.route_aliases(model_name)
+        if not route_aliases:
             raise HTTPException(status_code=404, detail=f"unsupported model alias: {model_name}")
 
         session_id = extract_session_id(payload, x_litellm_session_id, x_opencode_session_id)
         stream = bool(payload.get("stream"))
 
-        upstream_payload = dict(payload)
-        upstream_payload["model"] = alias.upstream_model
-
         if stream:
             return StreamingResponse(
-                stream_upstream(alias, session_id, upstream_payload, settings, state),
+                stream_upstream_route(route_aliases, session_id, payload, settings, state),
                 media_type="text/event-stream",
             )
-        try:
-            return await call_upstream(alias, session_id, upstream_payload, settings, state)
-        except NoAvailableKeyError as exc:
-            return all_keys_frozen_response(exc)
+        last_frozen: NoAvailableKeyError | None = None
+        for base_alias in route_aliases:
+            alias = state.alias_with_runtime_weights(base_alias)
+            upstream_payload = dict(payload)
+            upstream_payload["model"] = alias.upstream_model
+            try:
+                return await call_upstream(alias, session_id, upstream_payload, settings, state)
+            except NoAvailableKeyError as exc:
+                last_frozen = exc
+        if last_frozen is not None:
+            return all_keys_frozen_response(last_frozen)
+        raise HTTPException(status_code=404, detail=f"unsupported model alias: {model_name}")
 
     return app
 
@@ -289,6 +295,33 @@ async def call_upstream(
             usage=extract_usage(content),
         )
         return JSONResponse(status_code=response.status_code, content=content)
+
+
+async def stream_upstream_route(
+    aliases: list[ModelAlias],
+    session_id: str | None,
+    payload: dict[str, Any],
+    settings: Settings,
+    state: RouterState,
+):
+    last_error: bytes | None = None
+    for base_alias in aliases:
+        alias = state.alias_with_runtime_weights(base_alias)
+        upstream_payload = dict(payload)
+        upstream_payload["model"] = alias.upstream_model
+        stream = stream_upstream(alias, session_id, upstream_payload, settings, state)
+        first_chunk = await anext(stream, None)
+        if first_chunk is None:
+            continue
+        if b'"type": "upstream_connect_error"' in first_chunk:
+            last_error = first_chunk
+            continue
+        yield first_chunk
+        async for chunk in stream:
+            yield chunk
+        return
+    if last_error is not None:
+        yield last_error
 
 
 async def stream_upstream(

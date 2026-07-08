@@ -113,6 +113,20 @@ types are `subscription` for Ark/OpenAI relay keys and `payg` for the official D
 Provider base URLs are stored in `config/providers.json` and can be edited from Settings.
 New requests pick up provider URL changes immediately without restarting the router.
 
+Model tier routes are stored in `config/model-routes.json`. The router exposes `high-auto`
+and `low-auto` as stable model names; each route points to an existing model alias and can
+optionally list fallback aliases. Defaults are:
+
+```json
+{
+  "high-auto": {"target": "glm-latest-auto", "fallbacks": []},
+  "low-auto": {"target": "deepseek-v4-flash-auto", "fallbacks": []}
+}
+```
+
+Fallbacks are tried in order after the primary route has no available upstream key. Leave
+`fallbacks` empty to disable fallback routing.
+
 The router's own bearer token (used to authenticate incoming `Authorization: Bearer ...`
 requests from OpenCode and the dashboard) is read in this order:
 
@@ -143,6 +157,8 @@ necessary.
 
 ## Current Model Aliases
 
+- `high-auto` -> configurable route, default `glm-latest-auto`
+- `low-auto` -> configurable route, default `deepseek-v4-flash-auto`
 - `glm-latest-auto` -> `openai/glm-5.2`
 - `deepseek-v4-pro-auto` -> `openai/deepseek-v4-pro`
 - `deepseek-v4-flash-auto` -> `openai/deepseek-v4-flash`

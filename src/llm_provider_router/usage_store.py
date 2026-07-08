@@ -415,6 +415,63 @@ class ProviderConfig:
         self.path.write_text(content, encoding="utf-8")
 
 
+class ModelRouteConfig:
+    def __init__(self, path: str, defaults: dict[str, dict[str, object]]):
+        if path == ":memory:":
+            self.path = Path(path)
+        else:
+            expanded_path = Path(os.path.expanduser(path))
+            self.path = expanded_path if expanded_path.is_absolute() else Path.cwd() / expanded_path
+        self.defaults = dict(defaults)
+        self._memory: dict[str, dict[str, object]] = dict(defaults)
+        self._lock = threading.Lock()
+
+    def get(self, known_aliases: set[str]) -> dict[str, dict[str, object]]:
+        with self._lock:
+            routes = normalize_model_routes(self.defaults, known_aliases)
+            if str(self.path) == ":memory:":
+                routes.update(normalize_model_routes(self._memory, known_aliases))
+                return routes
+            if not self.path.exists():
+                self._write(routes)
+                return routes
+            try:
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                return routes
+            if isinstance(data, dict):
+                routes.update(normalize_model_routes(data, known_aliases))
+            return routes
+
+    def _write(self, routes: dict[str, dict[str, object]]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        content = json.dumps(dict(sorted(routes.items())), indent=2) + "\n"
+        self.path.write_text(content, encoding="utf-8")
+
+
+def normalize_model_routes(
+    routes: dict[str, object],
+    known_aliases: set[str],
+) -> dict[str, dict[str, object]]:
+    normalized: dict[str, dict[str, object]] = {}
+    for route_name, item in routes.items():
+        if not isinstance(route_name, str) or not isinstance(item, dict):
+            continue
+        target = item.get("target")
+        if not isinstance(target, str) or target not in known_aliases:
+            continue
+        raw_fallbacks = item.get("fallbacks", [])
+        if not isinstance(raw_fallbacks, list):
+            raw_fallbacks = []
+        fallbacks = [
+            fallback
+            for fallback in raw_fallbacks
+            if isinstance(fallback, str) and fallback in known_aliases and fallback != target
+        ]
+        normalized[route_name] = {"target": target, "fallbacks": fallbacks}
+    return normalized
+
+
 class CustomKeyPoolConfig:
     def __init__(self, path: str):
         if path == ":memory:":

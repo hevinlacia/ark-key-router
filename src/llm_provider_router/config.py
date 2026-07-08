@@ -10,6 +10,7 @@ DEFAULT_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/coding/v3"
 DEFAULT_WEIGHT_CONFIG_PATH = "config/key-weights.json"
 DEFAULT_PROVIDER_CONFIG_PATH = "config/providers.json"
 DEFAULT_CUSTOM_KEY_CONFIG_PATH = "config/custom-keys.json"
+DEFAULT_MODEL_ROUTE_CONFIG_PATH = "config/model-routes.json"
 DEFAULT_ROUTER_AUTH_CONFIG_PATH = "config/router-auth.json"
 DEFAULT_KEY_CONFIG_PATH = "config/api-keys.sops.json"
 DEFAULT_SOPS_AGE_KEY_FILE = "~/.config/sops/age/keys.txt"
@@ -105,6 +106,7 @@ class Settings:
     weight_config_path: str
     provider_config_path: str
     custom_key_config_path: str
+    model_route_config_path: str
     router_auth_config_path: str
     key_config_path: str
     sops_age_key_file: str
@@ -142,19 +144,6 @@ DEEPSEEK_OFFICIAL_KEYS: tuple[KeyRef, ...] = (
 
 
 ALIASES: dict[str, ModelAlias] = {
-    "high-model-auto": ModelAlias(
-        alias="high-model-auto",
-        litellm_model="openai/gpt-5.5",
-        base_url="https://api.aixhan.com/v1",
-        keys=OAI_HEVIN_KEYS,
-        retry_policy=OAI_RELAY_RETRY_POLICY,
-    ),
-    "low-model-auto": ModelAlias(
-        alias="low-model-auto",
-        litellm_model="openai/deepseek-v4-flash",
-        base_url=DEFAULT_ARK_BASE_URL,
-        keys=ARK_KEYS,
-    ),
     "picture-model-auto": ModelAlias(
         alias="picture-model-auto",
         litellm_model="openai/minimax-m3",
@@ -213,6 +202,11 @@ ALIASES: dict[str, ModelAlias] = {
     ),
 }
 
+DEFAULT_MODEL_ROUTES: dict[str, dict[str, object]] = {
+    "high-auto": {"target": "glm-latest-auto", "fallbacks": []},
+    "low-auto": {"target": "deepseek-v4-flash-auto", "fallbacks": []},
+}
+
 
 def load_settings() -> Settings:
     return Settings(
@@ -248,6 +242,10 @@ def load_settings() -> Settings:
         custom_key_config_path=os.getenv(
             "LLM_PROVIDER_ROUTER_CUSTOM_KEY_CONFIG_PATH",
             DEFAULT_CUSTOM_KEY_CONFIG_PATH,
+        ),
+        model_route_config_path=os.getenv(
+            "LLM_PROVIDER_ROUTER_MODEL_ROUTE_CONFIG_PATH",
+            DEFAULT_MODEL_ROUTE_CONFIG_PATH,
         ),
         router_auth_config_path=os.getenv(
             "LLM_PROVIDER_ROUTER_AUTH_CONFIG_PATH",

@@ -6,9 +6,17 @@ from unittest.mock import AsyncMock, patch
 import httpx
 from fastapi.testclient import TestClient
 
-from llm_provider_router.config import ALIASES, ARK_KEYS, ModelAlias, RetryPolicy, Settings
+from llm_provider_router.config import (
+    ALIASES,
+    ARK_KEYS,
+    DEFAULT_MODEL_ROUTES,
+    ModelAlias,
+    RetryPolicy,
+    Settings,
+)
 from llm_provider_router.proxy import call_upstream, create_app
 from llm_provider_router.state import NoAvailableKeyError, RouterState, parse_quota_reset
+from llm_provider_router.usage_store import ModelRouteConfig
 
 
 def settings(usage_db_path: str = ":memory:", weight_config_path: str = ":memory:") -> Settings:
@@ -24,6 +32,7 @@ def settings(usage_db_path: str = ":memory:", weight_config_path: str = ":memory
         weight_config_path=weight_config_path,
         provider_config_path=":memory:",
         custom_key_config_path=":memory:",
+        model_route_config_path=":memory:",
         router_auth_config_path=":memory:",
         key_config_path=":memory:",
         sops_age_key_file="~/.config/sops/age/keys.txt",
@@ -300,17 +309,44 @@ def test_models_endpoint_returns_openai_compatible_list() -> None:
     assert {item["id"] for item in body["data"]} >= {
         "glm-latest-auto",
         "minimax-latest-auto",
-        "high-model-auto",
-        "low-model-auto",
+        "high-auto",
+        "low-auto",
         "picture-model-auto",
     }
 
 
 def test_model_tier_aliases_route_to_expected_upstreams() -> None:
-    assert ALIASES["high-model-auto"].upstream_model == "gpt-5.5"
-    assert ALIASES["high-model-auto"].keys[0].provider == "openai-relay"
-    assert ALIASES["low-model-auto"].upstream_model == "deepseek-v4-flash"
+    state = RouterState(settings())
+
+    assert state.settings_aliases()["high-auto"].upstream_model == "glm-5.2"
+    assert state.settings_aliases()["high-auto"].keys[0].provider == "ark"
+    assert state.settings_aliases()["low-auto"].upstream_model == "deepseek-v4-flash"
     assert ALIASES["picture-model-auto"].upstream_model == "minimax-m3"
+
+
+def test_model_route_config_can_override_high_and_low_targets(tmp_path) -> None:
+    import json
+
+    route_path = tmp_path / "model-routes.json"
+    route_path.write_text(
+        json.dumps(
+            {
+                "high-auto": {
+                    "target": "deepseek-v4-pro-auto",
+                    "fallbacks": ["glm-latest-auto"],
+                },
+                "low-auto": {"target": "minimax-latest-auto", "fallbacks": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = RouterState(settings())
+    state.model_route_config = ModelRouteConfig(str(route_path), DEFAULT_MODEL_ROUTES)
+
+    high_route = state.route_aliases("high-auto")
+
+    assert [alias.upstream_model for alias in high_route] == ["deepseek-v4-pro", "glm-5.2"]
+    assert state.settings_aliases()["low-auto"].upstream_model == "minimax-m3"
 
 
 def test_models_endpoint_validates_local_token() -> None:
@@ -328,6 +364,7 @@ def test_models_endpoint_validates_local_token() -> None:
                 weight_config_path=":memory:",
                 provider_config_path=":memory:",
                 custom_key_config_path=":memory:",
+                model_route_config_path=":memory:",
                 router_auth_config_path=":memory:",
                 key_config_path=":memory:",
                 sops_age_key_file="~/.config/sops/age/keys.txt",

@@ -1,0 +1,10 @@
+{
+  "high-auto": {
+    "target": "glm-latest-auto",
+    "fallbacks": []
+  },
+  "low-auto": {
+    "target": "deepseek-v4-flash-auto",
+    "fallbacks": []
+  }
+}

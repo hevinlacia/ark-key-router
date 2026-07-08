@@ -9,9 +9,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
-from .config import ALIASES, KeyRef, ModelAlias, Settings
+from .config import ALIASES, DEFAULT_MODEL_ROUTES, KeyRef, ModelAlias, Settings
 from .key_store import EncryptedKeyConfig
-from .usage_store import CustomKeyPoolConfig, KeyWeightConfig, ProviderConfig, UsageStore
+from .usage_store import (
+    CustomKeyPoolConfig,
+    KeyWeightConfig,
+    ModelRouteConfig,
+    ProviderConfig,
+    UsageStore,
+)
 
 
 KEY_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -41,6 +47,10 @@ class RouterState:
             default_provider_base_urls(),
         )
         self.custom_key_config = CustomKeyPoolConfig(settings.custom_key_config_path)
+        self.model_route_config = ModelRouteConfig(
+            settings.model_route_config_path,
+            DEFAULT_MODEL_ROUTES,
+        )
         self.key_config = EncryptedKeyConfig(
             settings.key_config_path,
             settings.sops_age_recipient,
@@ -204,8 +214,10 @@ class RouterState:
             }
         return {
             "aliases": aliases,
+            "model_routes": self.model_routes(),
             "weights": weights,
             "config_path": str(self.weight_config.path),
+            "model_route_config_path": str(self.model_route_config.path),
         }
 
     def provider_base_urls(self) -> dict[str, str]:
@@ -348,7 +360,7 @@ class RouterState:
             if binding.key_name not in zero_weight_names
         }
 
-    def settings_aliases(self) -> dict[str, ModelAlias]:
+    def base_aliases(self) -> dict[str, ModelAlias]:
         aliases = dict(ALIASES)
         for key in self.custom_key_refs():
             for alias_name in self.custom_key_aliases(key.name):
@@ -364,8 +376,39 @@ class RouterState:
                 )
         return aliases
 
+    def settings_aliases(self) -> dict[str, ModelAlias]:
+        aliases = self.base_aliases()
+        for route_name, route in self.model_routes().items():
+            target = aliases.get(str(route["target"]))
+            if target is not None:
+                aliases[route_name] = self.request_alias(route_name, target)
+        return aliases
+
+    def model_routes(self) -> dict[str, dict[str, object]]:
+        return self.model_route_config.get(set(self.base_aliases()))
+
+    def route_aliases(self, model_name: str) -> list[ModelAlias]:
+        aliases = self.base_aliases()
+        route = self.model_routes().get(model_name)
+        if route is None:
+            alias = aliases.get(model_name)
+            return [alias] if alias is not None else []
+        names = [str(route["target"]), *[str(name) for name in route.get("fallbacks", [])]]
+        routed_aliases = [aliases[name] for name in names if name in aliases]
+        return [self.request_alias(model_name, alias) for alias in routed_aliases]
+
+    @staticmethod
+    def request_alias(alias_name: str, target: ModelAlias) -> ModelAlias:
+        return ModelAlias(
+            alias=alias_name,
+            litellm_model=target.litellm_model,
+            base_url=target.base_url,
+            keys=target.keys,
+            retry_policy=target.retry_policy,
+        )
+
     def auto_alias_names(self) -> list[str]:
-        return sorted(name for name in ALIASES if "auto" in name)
+        return sorted(name for name in self.settings_aliases() if "auto" in name)
 
     def custom_key_refs(self) -> list[KeyRef]:
         refs: list[KeyRef] = []
