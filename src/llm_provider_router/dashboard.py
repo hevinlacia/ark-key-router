@@ -124,7 +124,7 @@ DASHBOARD_HTML = """
       <section class="card"><h2>Usage by Model</h2><div id="by-model"></div></section>
       <section class="card"><h2>Usage by Key</h2><div id="by-key"></div></section>
       <section class="card"><h2>Usage by Status</h2><div id="by-status"></div></section>
-      <section class="card"><h2>Frozen Keys</h2><div id="frozen"></div></section>
+      <section class="card"><div class="section-title"><h2>Frozen Keys</h2><button class="secondary" onclick="clearFrozenKeys()">Clear Frozen Keys</button></div><div id="frozen"></div></section>
     </section>
 
     <section id="page-settings" class="page">
@@ -508,6 +508,11 @@ async function addKey() {
 
 async function resetUsage() {
   await fetch('/api/usage/reset', { method: 'POST' });
+  await loadData();
+}
+
+async function clearFrozenKeys() {
+  await fetch('/api/frozen/clear', { method: 'POST' });
   await loadData();
 }
 

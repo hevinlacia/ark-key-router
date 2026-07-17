@@ -13,6 +13,8 @@ DEFAULT_CUSTOM_KEY_CONFIG_PATH = "config/custom-keys.json"
 DEFAULT_MODEL_ROUTE_CONFIG_PATH = "config/model-routes.json"
 DEFAULT_ROUTER_AUTH_CONFIG_PATH = "config/router-auth.json"
 DEFAULT_KEY_CONFIG_PATH = "config/api-keys.sops.json"
+DEFAULT_USAGE_DB_PATH = "~/.local/state/llm-provider-router/usage.sqlite3"
+DEFAULT_STATE_DB_PATH = "~/.local/state/llm-provider-router/state.sqlite3"
 DEFAULT_SOPS_AGE_KEY_FILE = "~/.config/sops/age/keys.txt"
 DEFAULT_SOPS_AGE_RECIPIENT = "age1n4kxrm8969pqaax2u63akszmdgvu5dr2tfnwpt2d957ewtwx4sescvvz7d"
 
@@ -103,6 +105,7 @@ class Settings:
     request_timeout_seconds: float
     local_bearer_token: str | None
     usage_db_path: str
+    state_db_path: str
     weight_config_path: str
     provider_config_path: str
     custom_key_config_path: str
@@ -265,7 +268,11 @@ def load_settings() -> Settings:
         ),
         usage_db_path=os.getenv(
             "LLM_PROVIDER_ROUTER_USAGE_DB_PATH",
-            "~/.local/state/llm-provider-router/usage.sqlite3",
+            DEFAULT_USAGE_DB_PATH,
+        ),
+        state_db_path=os.getenv(
+            "LLM_PROVIDER_ROUTER_STATE_DB_PATH",
+            DEFAULT_STATE_DB_PATH,
         ),
         weight_config_path=os.getenv(
             "LLM_PROVIDER_ROUTER_WEIGHT_CONFIG_PATH",

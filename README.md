@@ -11,7 +11,8 @@ This project is a small replacement path for LiteLLM's key-pool routing. It keep
 - Auth freeze: 401/403 authentication errors (revoked/expired/invalid key, including quota exhaustion surfacing as auth errors) freeze the key for a configurable duration (default 24 hours) so failover routes around it.
 - Failover: Ark `*-auto` aliases retry across keys on 401/402/429/5xx; if a bound key is frozen, the same session is rebound to another healthy key.
 - Streaming: SSE streams are proxied without buffering the whole response.
-- Usage metrics: request/error counts and OpenAI `usage` tokens are tracked in memory by model, key, and status code.
+- Usage metrics: request/error counts and OpenAI `usage` tokens are persisted to SQLite by model, key, and status code.
+- State persistence: frozen keys and session bindings are persisted to SQLite so they survive restarts and blue/green hot deploys; a quota-frozen key is not retried immediately after a deploy, and active sessions keep their bound key.
 
 ## Intended Deployment
 
@@ -112,6 +113,7 @@ LLM_PROVIDER_ROUTER_AUTH_INVALID_FREEZE_SECONDS=86400
 LLM_PROVIDER_ROUTER_REQUEST_TIMEOUT_SECONDS=600
 LLM_PROVIDER_ROUTER_BEARER_TOKEN=<optional; falls back to config/router-auth.json, then LLM_PROVIDER_ROUTER_API_KEY>
 LLM_PROVIDER_ROUTER_USAGE_DB_PATH=~/.local/state/llm-provider-router/usage.sqlite3
+LLM_PROVIDER_ROUTER_STATE_DB_PATH=~/.local/state/llm-provider-router/state.sqlite3
 LLM_PROVIDER_ROUTER_WEIGHT_CONFIG_PATH=config/key-weights.json
 LLM_PROVIDER_ROUTER_PROVIDER_CONFIG_PATH=config/providers.json
 LLM_PROVIDER_ROUTER_AUTH_CONFIG_PATH=config/router-auth.json
@@ -176,6 +178,11 @@ PostgreSQL is not required for the local single-instance deployment; SQLite keep
 self-contained while still surviving restarts. Move to PostgreSQL only if multiple router
 instances need to share the same metrics store or if long-term cross-host reporting becomes
 necessary.
+
+Frozen keys (quota/auth freezes) and session bindings (session affinity) are persisted to a
+separate SQLite database (`state.sqlite3`) so they survive restarts and hot deploys. On
+startup the router reloads active freezes and bindings from disk; resetting usage metrics
+does not clear frozen keys. Override the path with `LLM_PROVIDER_ROUTER_STATE_DB_PATH`.
 
 ## Current Model Aliases
 

@@ -78,6 +78,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         state.reset_usage()
         return {"ok": True, "usage": state.usage_snapshot()}
 
+    @app.post("/api/frozen/clear")
+    async def api_frozen_clear() -> dict[str, Any]:
+        state.clear_frozen()
+        return {"ok": True, **state.snapshot()}
+
     @app.get("/api/config/weights")
     async def api_config_weights() -> dict[str, Any]:
         return {"ok": True, **state.key_config_snapshot()}

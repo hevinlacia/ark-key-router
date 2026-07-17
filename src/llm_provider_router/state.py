@@ -11,6 +11,7 @@ from email.utils import parsedate_to_datetime
 
 from .config import ALIASES, DEFAULT_MODEL_ROUTES, KeyRef, ModelAlias, Settings
 from .key_store import EncryptedKeyConfig
+from .state_store import StateStore
 from .usage_store import (
     CustomKeyPoolConfig,
     KeyWeightConfig,
@@ -38,8 +39,15 @@ class SessionBinding:
 class RouterState:
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.frozen: dict[str, FrozenKey] = {}
-        self.bindings: dict[tuple[str, str], SessionBinding] = {}
+        self.state_store = StateStore(settings.state_db_path)
+        self.frozen: dict[str, FrozenKey] = {
+            name: FrozenKey(until=until, reason=reason)
+            for name, (until, reason) in self.state_store.load_frozen().items()
+        }
+        self.bindings: dict[tuple[str, str], SessionBinding] = {
+            key: SessionBinding(key_name=key_name, expires_at=expires_at)
+            for key, (key_name, expires_at) in self.state_store.load_bindings().items()
+        }
         self.usage_store = UsageStore(settings.usage_db_path)
         self.weight_config = KeyWeightConfig(settings.weight_config_path, default_key_weights())
         self.provider_config = ProviderConfig(
@@ -60,8 +68,14 @@ class RouterState:
 
     def cleanup(self) -> None:
         now = time.time()
+        expired_frozen = [name for name, item in self.frozen.items() if item.until <= now]
+        expired_bindings = [key for key, item in self.bindings.items() if item.expires_at <= now]
         self.frozen = {name: item for name, item in self.frozen.items() if item.until > now}
         self.bindings = {key: item for key, item in self.bindings.items() if item.expires_at > now}
+        if expired_frozen:
+            self.state_store.delete_frozen(expired_frozen)
+        if expired_bindings:
+            self.state_store.delete_bindings(expired_bindings)
 
     def is_frozen(self, key_name: str) -> bool:
         item = self.frozen.get(key_name)
@@ -69,6 +83,7 @@ class RouterState:
             return False
         if item.until <= time.time():
             self.frozen.pop(key_name, None)
+            self.state_store.delete_frozen([key_name])
             return False
         return True
 
@@ -76,12 +91,25 @@ class RouterState:
         current = self.frozen.get(key_name)
         if current is None or until > current.until:
             self.frozen[key_name] = FrozenKey(until=until, reason=reason)
+            self.state_store.upsert_frozen(key_name, until, reason)
+
+    def clear_frozen(self) -> None:
+        """Clear all frozen keys so the router retries them on the next request.
+
+        Use this when the stored freeze window is inaccurate (e.g. a fallback
+        freeze with no upstream reset timestamp) and the key should be retried
+        sooner than the recorded ``until`` time.
+        """
+        self.frozen.clear()
+        self.state_store.clear_frozen()
 
     def bind(self, alias: str, session_id: str, key_name: str) -> None:
+        expires_at = time.time() + self.settings.session_ttl_seconds
         self.bindings[(alias, session_id)] = SessionBinding(
             key_name=key_name,
-            expires_at=time.time() + self.settings.session_ttl_seconds,
+            expires_at=expires_at,
         )
+        self.state_store.upsert_binding(alias, session_id, key_name, expires_at)
 
     def select_key(self, alias: ModelAlias, session_id: str | None) -> KeyRef:
         return self.select_key_excluding(alias, session_id=session_id, excluded=set())
@@ -359,6 +387,7 @@ class RouterState:
             for binding_key, binding in self.bindings.items()
             if binding.key_name not in zero_weight_names
         }
+        self.state_store.delete_bindings_for_keys(zero_weight_names)
 
     def base_aliases(self) -> dict[str, ModelAlias]:
         aliases = dict(ALIASES)

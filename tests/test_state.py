@@ -35,6 +35,7 @@ def settings(usage_db_path: str = ":memory:", weight_config_path: str = ":memory
         request_timeout_seconds=60,
         local_bearer_token=None,
         usage_db_path=usage_db_path,
+        state_db_path=":memory:",
         weight_config_path=weight_config_path,
         provider_config_path=":memory:",
         custom_key_config_path=":memory:",
@@ -389,6 +390,7 @@ def test_model_routes_api_can_update_virtual_auto_route(tmp_path) -> None:
                 request_timeout_seconds=60,
                 local_bearer_token=None,
                 usage_db_path=":memory:",
+                state_db_path=":memory:",
                 weight_config_path=":memory:",
                 provider_config_path=":memory:",
                 custom_key_config_path=":memory:",
@@ -443,6 +445,7 @@ def test_models_endpoint_validates_local_token() -> None:
                 request_timeout_seconds=60,
                 local_bearer_token="local-token",
                 usage_db_path=":memory:",
+                state_db_path=":memory:",
                 weight_config_path=":memory:",
                 provider_config_path=":memory:",
                 custom_key_config_path=":memory:",
@@ -820,3 +823,120 @@ def test_call_upstream_returns_last_retriable_status_when_deadline_exceeded() ->
 
     asyncio.run(run_test())
     assert post.await_count == 1
+
+
+def _state_settings(state_db_path: str = ":memory:", **overrides) -> Settings:
+    import dataclasses
+
+    return dataclasses.replace(settings(), state_db_path=state_db_path, **overrides)
+
+
+def test_frozen_keys_persist_across_restart(tmp_path) -> None:
+    db_path = str(tmp_path / "state.sqlite3")
+    state = RouterState(_state_settings(db_path))
+    state.freeze("garvin", time.time() + 3600, "monthly_quota")
+
+    restored = RouterState(_state_settings(db_path))
+
+    assert restored.is_frozen("garvin")
+    snapshot = restored.snapshot()
+    assert snapshot["frozen"]["garvin"]["reason"] == "monthly_quota"
+
+
+def test_clear_frozen_removes_all_keys_in_memory_and_db(tmp_path) -> None:
+    db_path = str(tmp_path / "state.sqlite3")
+    state = RouterState(_state_settings(db_path))
+    state.freeze("garvin", time.time() + 3600, "monthly_quota")
+    state.freeze("wilford", time.time() + 1800, "auth_invalid")
+
+    state.clear_frozen()
+
+    assert not state.is_frozen("garvin")
+    assert not state.is_frozen("wilford")
+    assert state.snapshot()["frozen"] == {}
+    # the clear must persist so a restart does not restore old freezes
+    restored = RouterState(_state_settings(db_path))
+    assert restored.snapshot()["frozen"] == {}
+    assert not restored.is_frozen("garvin")
+
+
+def test_expired_frozen_keys_not_loaded_after_restart(tmp_path) -> None:
+    db_path = str(tmp_path / "state.sqlite3")
+    state = RouterState(_state_settings(db_path))
+    state.freeze("garvin", time.time() + 3600, "monthly_quota")
+    state.freeze("wilford", time.time() - 1, "expired")
+
+    restored = RouterState(_state_settings(db_path))
+
+    assert restored.is_frozen("garvin")
+    assert not restored.is_frozen("wilford")
+
+
+def test_frozen_key_only_extends_freeze_window(tmp_path) -> None:
+    db_path = str(tmp_path / "state.sqlite3")
+    state = RouterState(_state_settings(db_path))
+    first_until = time.time() + 3600
+    state.freeze("garvin", first_until, "monthly_quota")
+    # a shorter freeze must not shorten the existing freeze window
+    state.freeze("garvin", first_until - 100, "shorter")
+
+    restored = RouterState(_state_settings(db_path))
+    assert restored.is_frozen("garvin")
+    assert restored.snapshot()["frozen"]["garvin"]["reason"] == "monthly_quota"
+
+
+def test_session_bindings_persist_across_restart(tmp_path) -> None:
+    db_path = str(tmp_path / "state.sqlite3")
+    state = RouterState(_state_settings(db_path))
+    state.bind("glm-latest-auto", "session-a", "garvin")
+
+    restored = RouterState(_state_settings(db_path))
+
+    selected = restored.select_key(alias(), "session-a")
+    assert selected.name == "garvin"
+
+
+def test_expired_bindings_not_loaded_after_restart(tmp_path) -> None:
+    db_path = str(tmp_path / "state.sqlite3")
+    state = RouterState(_state_settings(db_path, session_ttl_seconds=1))
+    state.bind("glm-latest-auto", "session-a", "garvin")
+
+    import time as _time
+
+    _time.sleep(1.1)
+
+    restored = RouterState(_state_settings(db_path))
+
+    assert restored.snapshot()["bindings"] == 0
+
+
+def test_zero_weight_drops_persisted_binding(tmp_path) -> None:
+    db_path = str(tmp_path / "state.sqlite3")
+    weight_path = str(tmp_path / "key-weights.json")
+    state = RouterState(_state_settings(db_path, weight_config_path=weight_path))
+    state.bind("glm-latest-auto", "session-a", "garvin")
+    assert state.snapshot()["bindings"] == 1
+
+    state.set_key_weights({"garvin": 0})
+
+    restored = RouterState(_state_settings(db_path, weight_config_path=weight_path))
+    assert restored.snapshot()["bindings"] == 0
+
+
+def test_usage_reset_does_not_clear_frozen_keys(tmp_path) -> None:
+    state_db_path = str(tmp_path / "state.sqlite3")
+    usage_db_path = str(tmp_path / "usage.sqlite3")
+    state = RouterState(_state_settings(state_db_path, usage_db_path=usage_db_path))
+    state.freeze("garvin", time.time() + 3600, "monthly_quota")
+    state.record_usage(
+        model="glm-latest-auto",
+        key_name="garvin",
+        status_code=200,
+        usage={"total_tokens": 5},
+    )
+
+    state.reset_usage()
+
+    restored = RouterState(_state_settings(state_db_path, usage_db_path=usage_db_path))
+    assert restored.is_frozen("garvin")
+    assert restored.usage_snapshot()["total"]["requests"] == 0
