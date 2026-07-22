@@ -1,60 +1,49 @@
 # LLM Provider Router
 
-OpenAI-compatible key-router proxy for Ark-backed model aliases.
+OpenAI-compatible provider/key router for local model aliases.
 
-This project is a small replacement path for LiteLLM's key-pool routing. It keeps the stateful parts outside LiteLLM:
+The project is now split into:
 
-- Session affinity: `x-litellm-session-id`, `x-opencode-session-id`, or request metadata binds a session to one key.
+- **Rust backend** (`axum` + `reqwest` + `rusqlite`) for routing, usage metrics, state persistence, and the blue/green front proxy.
+- **TypeScript + React frontend** (`Vite`) for the dashboard and settings UI.
+
+It preserves the old API/config contracts so existing OpenCode/headroom-proxy clients can keep using `http://127.0.0.1:8789`.
+
+## What It Does
+
+- Session affinity: binds `x-litellm-session-id`, `x-opencode-session-id`, or request metadata to one upstream key.
 - Sliding TTL: active session bindings refresh for 1 hour by default.
-- Quota freeze: provider quota errors freeze the selected key until the reset timestamp from the error message.
-- Fallback freeze: if the provider gives no reset timestamp, monthly quota freezes for 24 hours and 5-hour quota freezes for 1.5 hours.
-- Auth freeze: 401/403 authentication errors (revoked/expired/invalid key, including quota exhaustion surfacing as auth errors) freeze the key for a configurable duration (default 24 hours) so failover routes around it.
-- Failover: Ark `*-auto` aliases retry across keys on 401/402/429/5xx; if a bound key is frozen, the same session is rebound to another healthy key.
-- Streaming: SSE streams are proxied without buffering the whole response.
-- Usage metrics: request/error counts and OpenAI `usage` tokens are persisted to SQLite by model, key, and status code.
-- State persistence: frozen keys and session bindings are persisted to SQLite so they survive restarts and blue/green hot deploys; a quota-frozen key is not retried immediately after a deploy, and active sessions keep their bound key.
+- Quota freeze: provider quota/auth errors freeze the selected key until reset/fallback time.
+- Failover: `*-auto` aliases retry across healthy keys and configured model-route fallbacks.
+- Streaming: SSE chat completion streams are proxied without buffering the full response.
+- Usage metrics: request/error/token counts persist to SQLite by model, key, status, day, and month.
+- Hot settings: provider URLs, key weights, model routes, and encrypted API keys can be edited from the dashboard.
+- Blue/green deploy: stable front proxy on `:8789` forwards to backend slots `:8790` / `:8791`.
 
 ## Intended Deployment
 
-Recommended path:
-
 ```text
-OpenCode / headroom-proxy -> llm-provider-router front proxy :8789 -> blue/green router backend :8790/:8791 -> Ark OpenAI-compatible API
+OpenCode / headroom-proxy -> llm-provider-router front proxy :8789 -> blue/green backend :8790/:8791 -> upstream OpenAI-compatible APIs
 ```
 
-The stable client endpoint remains `http://127.0.0.1:8789`. The front proxy reads
-`~/.local/state/llm-provider-router/active-backend.json` and forwards new requests to the
-active backend slot. Backends run on `127.0.0.1:8790` (`blue`) and `127.0.0.1:8791`
-(`green`), so a deploy can start the inactive slot, health-check it, switch new traffic,
-and let existing streaming requests drain on the old slot before stopping it.
+The front proxy reads `~/.local/state/llm-provider-router/active-backend.json` and forwards new requests to the active backend slot.
 
 ## Quick Start
 
 ```bash
 cd /home/hevin/Developer/tools/llm-provider-router
-uv sync
+npm --prefix frontend install
+npm --prefix frontend run build
+cargo build --release
 bin/install-service.sh
 ```
 
-Health check:
+Health checks:
 
 ```bash
 curl http://127.0.0.1:8789/health
 curl http://127.0.0.1:8789/_proxy/health
 ```
-
-Hot deploy after updating code:
-
-```bash
-cd /home/hevin/Developer/tools/llm-provider-router
-uv sync
-bin/hot-deploy-router.py deploy
-```
-
-The deploy command starts the inactive backend slot, waits for `/health`, atomically
-switches the active backend file, waits for the drain window, and then stops the old slot.
-Use `--drain-seconds <n>` to tune the drain period or `bin/hot-deploy-router.py status`
-to inspect the current active slot.
 
 Dashboard:
 
@@ -62,44 +51,59 @@ Dashboard:
 xdg-open http://127.0.0.1:8789/dashboard
 ```
 
-The dashboard includes a **Key Weights** panel. Saving weights writes
-`config/key-weights.json`, and new requests use the updated ratios immediately
-without restarting the service.
-
-Usage metrics API:
+Hot deploy:
 
 ```bash
-curl http://127.0.0.1:8789/api/usage
-curl 'http://127.0.0.1:8789/api/usage?period=today'
-curl 'http://127.0.0.1:8789/api/usage?period=month'
-curl 'http://127.0.0.1:8789/api/usage?start=2026-07-01&end=2026-07-31'
-curl -X POST http://127.0.0.1:8789/api/usage/reset
+bin/hot-deploy-router.py deploy
+bin/hot-deploy-router.py status
 ```
 
-Example request:
+## Development
+
+Run backend directly:
 
 ```bash
-curl -N http://127.0.0.1:8789/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer local-dev' \
-  -H 'x-litellm-session-id: demo-session' \
-  -d '{"model":"glm-latest-auto","messages":[{"role":"user","content":"say ok"}],"stream":true}'
+cargo run -- backend
 ```
+
+Run front proxy directly:
+
+```bash
+cargo run -- front-proxy
+```
+
+Run React dashboard in dev mode:
+
+```bash
+npm --prefix frontend run dev
+```
+
+Build everything:
+
+```bash
+npm run build
+```
+
+## API Surface
+
+- `GET /health` — backend health, frozen keys, binding count.
+- `GET /`, `GET /dashboard` — React dashboard shell.
+- `GET /api/state` — state + usage snapshot.
+- `GET /api/usage` — usage metrics; supports `period`, `start`, and `end`.
+- `POST /api/usage/reset` — clear usage events.
+- `POST /api/frozen/clear` — clear frozen keys.
+- `GET/PUT /api/config/weights` — key routing weights.
+- `GET/PUT /api/config/model-routes` — virtual model route targets/fallbacks.
+- `GET/PUT /api/config/providers` — provider base URLs.
+- `GET/PUT/POST /api/config/keys` — encrypted key metadata/update/add.
+- `GET /v1/models` — OpenAI-compatible model list.
+- `POST /v1/chat/completions` — OpenAI-compatible chat completions, streaming and non-streaming.
+- `GET /_proxy/health` — front-proxy backend health.
+- `POST /_proxy/active/{slot}` — switch active blue/green slot.
 
 ## Configuration
 
-Configuration is environment-variable based. The default aliases mirror the LiteLLM router config in `src/llm_provider_router/config.py`. LiteLLM-style model names keep the `openai/` provider prefix in config, but the proxy sends the stripped model name to the Ark OpenAI-compatible endpoint.
-
-Required Ark key variables:
-
-```text
-OPENCODE_AI_ARK_GARVIN_API_KEY
-OPENCODE_AI_ARK_WILFORD_API_KEY
-OPENCODE_AI_ARK_HEVIN_API_KEY
-OPENCODE_AI_ARK_KHAINE_API_KEY
-OPENCODE_AI_ARK_CYRIL_API_KEY
-OPENCODE_AI_ARK_MOSS_API_KEY
-```
+The Rust backend keeps the same environment variables and JSON files as the previous implementation.
 
 Common settings:
 
@@ -116,88 +120,42 @@ LLM_PROVIDER_ROUTER_USAGE_DB_PATH=~/.local/state/llm-provider-router/usage.sqlit
 LLM_PROVIDER_ROUTER_STATE_DB_PATH=~/.local/state/llm-provider-router/state.sqlite3
 LLM_PROVIDER_ROUTER_WEIGHT_CONFIG_PATH=config/key-weights.json
 LLM_PROVIDER_ROUTER_PROVIDER_CONFIG_PATH=config/providers.json
+LLM_PROVIDER_ROUTER_CUSTOM_KEY_CONFIG_PATH=config/custom-keys.json
+LLM_PROVIDER_ROUTER_MODEL_ROUTE_CONFIG_PATH=config/model-routes.json
 LLM_PROVIDER_ROUTER_AUTH_CONFIG_PATH=config/router-auth.json
 LLM_PROVIDER_ROUTER_KEY_CONFIG_PATH=config/api-keys.sops.json
 LLM_PROVIDER_ROUTER_SOPS_AGE_RECIPIENT=age1n4kxrm8969pqaax2u63akszmdgvu5dr2tfnwpt2d957ewtwx4sescvvz7d
 SOPS_AGE_KEY_FILE=~/.config/sops/age/keys.txt
 ```
 
-No real key values should be committed or printed.
+Front proxy settings:
 
-API keys can be managed from the dashboard Settings page. Values are written to
-`config/api-keys.sops.json` encrypted with SOPS age recipient
-`age1n4kxrm8969pqaax2u63akszmdgvu5dr2tfnwpt2d957ewtwx4sescvvz7d`; the router decrypts
-that file locally with `SOPS_AGE_KEY_FILE` when sending upstream requests. The API and
-dashboard only expose whether a key is configured, never the plaintext key value.
-Keys are grouped by provider in Settings and include a billing marker. Current billing
-types are `subscription` for Ark/OpenAI relay keys and `payg` for the official DeepSeek key.
-
-Provider base URLs are stored in `config/providers.json` and can be edited from Settings.
-New requests pick up provider URL changes immediately without restarting the router.
-
-Model tier routes are stored in `config/model-routes.json`. The router exposes
-`high-model-auto`, `medium-model-auto`, and `low-model-auto` as stable virtual model
-names; each route points to an existing concrete model alias and can optionally list
-fallback aliases. Defaults are:
-
-```json
-{
-  "high-model-auto": {"target": "openai-gpt-5.5-hevin", "fallbacks": ["glm-latest-auto"]},
-  "medium-model-auto": {"target": "glm-latest-auto", "fallbacks": ["deepseek-v4-pro-auto"]},
-  "low-model-auto": {"target": "deepseek-v4-flash-auto", "fallbacks": ["glm-latest-auto"]}
-}
+```text
+LLM_PROVIDER_ROUTER_PROXY_HOST=127.0.0.1
+LLM_PROVIDER_ROUTER_PROXY_PORT=8789
+LLM_PROVIDER_ROUTER_BLUE_URL=http://127.0.0.1:8790
+LLM_PROVIDER_ROUTER_GREEN_URL=http://127.0.0.1:8791
+LLM_PROVIDER_ROUTER_ACTIVE_BACKEND_FILE=~/.local/state/llm-provider-router/active-backend.json
+LLM_PROVIDER_ROUTER_DEFAULT_SLOT=blue
 ```
 
-Fallbacks are tried in order after the primary route has no available upstream key. Leave
-`fallbacks` empty to disable fallback routing.
+API keys are managed through the dashboard and stored in `config/api-keys.sops.json` encrypted by SOPS. The API/dashboard only expose whether a key is configured, never plaintext values.
 
-The router's own bearer token (used to authenticate incoming `Authorization: Bearer ...`
-requests from OpenCode and the dashboard) is read in this order:
+## Persistence
 
-1. `LLM_PROVIDER_ROUTER_BEARER_TOKEN` environment variable.
-2. `config/router-auth.json` — a plaintext file `{ "bearer_token": "..." }` shipped
-   in the repository. Unlike the upstream `api-keys.sops.json` keys, this is a
-   low-risk local-only token and is committed to git so it syncs across machines
-   together with the router itself. Override the path with
-   `LLM_PROVIDER_ROUTER_AUTH_CONFIG_PATH`.
-3. `LLM_PROVIDER_ROUTER_API_KEY` for compatibility with existing OpenCode provider
-   configuration.
+Two SQLite files are used by default:
 
-Key routing weights are stored in `config/key-weights.json` by default, so the
-preferred local ratios can be committed and synced to GitHub without committing
-any secrets. The dashboard can update this file through `/api/config/weights`;
-new requests pick up the updated weights immediately without restarting the
-router. Existing session bindings continue until they expire unless a key is set
-to weight `0`, which drops active bindings for that key so it stops receiving
-new routed requests.
+- `usage.sqlite3` — usage event log and startup timestamp.
+- `state.sqlite3` — frozen keys and session bindings.
 
-Usage metrics are persisted to SQLite by default and can be filtered by `period`, `start`,
-and `end`. The API returns total request counts, token counts, daily/monthly rollups, and
-cache hit rate from `prompt_tokens_details.cached_tokens` when the upstream returns it.
-PostgreSQL is not required for the local single-instance deployment; SQLite keeps the service
-self-contained while still surviving restarts. Move to PostgreSQL only if multiple router
-instances need to share the same metrics store or if long-term cross-host reporting becomes
-necessary.
-
-Frozen keys (quota/auth freezes) and session bindings (session affinity) are persisted to a
-separate SQLite database (`state.sqlite3`) so they survive restarts and hot deploys. On
-startup the router reloads active freezes and bindings from disk; resetting usage metrics
-does not clear frozen keys. Override the path with `LLM_PROVIDER_ROUTER_STATE_DB_PATH`.
+The Rust schema intentionally matches the previous SQLite tables so existing local state survives the migration.
 
 ## Current Model Aliases
 
-- `high-model-auto` -> configurable route, default `openai/gpt-5.5`, fallback `glm-latest-auto`
+- `high-model-auto` -> configurable route, default `openai-gpt-5.5-hevin`, fallback `glm-latest-auto`
 - `medium-model-auto` -> configurable route, default `glm-latest-auto`, fallback `deepseek-v4-pro-auto`
 - `low-model-auto` -> configurable route, default `deepseek-v4-flash-auto`, fallback `glm-latest-auto`
 - `glm-latest-auto` -> `openai/glm-5.2`
 - `deepseek-v4-pro-auto` -> `openai/deepseek-v4-pro`
 - `deepseek-v4-flash-auto` -> `openai/deepseek-v4-flash`
 - `minimax-latest-auto` -> `openai/minimax-m3`
-
-## Replacement Plan
-
-1. Run this router on a new local port.
-2. Point only one Ark auto alias through it.
-3. Validate session stickiness and quota freeze behavior for 1-2 days.
-4. Move the remaining Ark auto aliases.
-5. Keep LiteLLM for non-Ark providers until this proxy covers all needed traffic.

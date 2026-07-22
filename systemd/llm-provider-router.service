@@ -14,7 +14,7 @@ Environment=LLM_PROVIDER_ROUTER_ACTIVE_BACKEND_FILE=/home/hevin/.local/state/llm
 Environment=SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 Environment=SSL_CERT_DIR=/etc/ssl/certs
 ExecSearchPath=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
-ExecStart=/usr/bin/uv run llm-provider-router-front-proxy
+ExecStart=/home/hevin/Developer/tools/llm-provider-router/target/release/llm-provider-router front-proxy
 Restart=on-failure
 RestartSec=3
 TimeoutStartSec=60

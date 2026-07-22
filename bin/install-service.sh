@@ -15,7 +15,9 @@ echo "  $USER_UNIT_DIR/llm-provider-router.service"
 echo "  $USER_UNIT_DIR/llm-provider-router-backend@.service"
 
 cd "$PROJECT_DIR"
-uv sync --quiet
+npm --prefix frontend install --silent
+npm --prefix frontend run build
+cargo build --release --quiet
 
 systemctl --user daemon-reload
 "$PROJECT_DIR/bin/hot-deploy-router.py" bootstrap --slot blue --stop-other
